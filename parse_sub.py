@@ -2,7 +2,7 @@
 """Read ./subscription and write the kept share links to nodes.txt.
 
 Uses the same IPv4 parser as test_ipv4_xray.py. Does not restart xray.
-start.sh runs this first, then restarts the proxy.
+update_xray_nodes.sh runs this first, then restarts the proxy.
 """
 
 from __future__ import annotations
@@ -18,8 +18,7 @@ from typing import Any
 
 import test_ipv4_xray as core
 
-_state = os.environ.get("XRAY_STATE_DIR", "").strip()
-BASE = Path(_state).expanduser().resolve() if _state else Path(__file__).resolve().parent
+BASE = Path(__file__).resolve().parent
 NODES = BASE / "nodes.txt"
 SUB = BASE / "subscription"
 MAX_BODY = 2_000_000
@@ -29,7 +28,8 @@ _URL_RE = re.compile(r"https?://\S+")
 
 def usage() -> None:
     print(
-        "把一行订阅地址写进 ~/rootlessxray/subscription，然后 source 本目录的 start.sh",
+        "把订阅地址写进 subscription，然后运行 bash run.sh\n"
+        "这一步会解析并写入 nodes.txt。不用加 --write。",
         file=sys.stderr,
     )
 

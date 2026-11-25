@@ -1,50 +1,32 @@
 #!/usr/bin/env bash
-# Usage: source /path/to/rootlessxray/proxy_env.sh
-# Points the current shell at this user's own rootlessxray ports.
+# Usage: source ./proxy_env.sh
+# Sets http(s)_proxy / all_proxy for the current shell to this xray instance.
 
-_KIT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+_PROXY_BASE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+_PORTS_FILE="${_PROXY_BASE}/ports.env"
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    echo "请用 source 加载，直接执行不会改当前终端："
-    echo "  source $0"
-    exit 1
+XRAY_SOCKS_PORT="${XRAY_SOCKS_PORT:-}"
+XRAY_HTTP_PORT="${XRAY_HTTP_PORT:-}"
+if [[ -f "$_PORTS_FILE" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" || "$line" != *=* ]] && continue
+        key="${line%%=*}"; val="${line#*=}"
+        key="${key// /}"
+        val="${val#"${val%%[![:space:]]*}"}"
+        val="${val%"${val##*[![:space:]]}"}"
+        val="${val#\"}"; val="${val%\"}"
+        val="${val#\'}"; val="${val%\'}"
+        case "$key" in
+            XRAY_SOCKS_PORT) [[ -z "$XRAY_SOCKS_PORT" ]] && XRAY_SOCKS_PORT="$val" ;;
+            XRAY_HTTP_PORT)  [[ -z "$XRAY_HTTP_PORT"  ]] && XRAY_HTTP_PORT="$val"  ;;
+        esac
+    done < "$_PORTS_FILE"
 fi
-
-_STATE="${XRAY_STATE_DIR:-$HOME/rootlessxray}"
-_PORTS_FILE="${_STATE}/ports.env"
-
-if [[ ! -f "$_PORTS_FILE" ]]; then
-    echo "还没有可用的代理。先把一行订阅地址写进 ${_STATE}/subscription，再执行："
-    echo "  source ${_KIT}/start.sh"
-    unset _STATE _PORTS_FILE _KIT
-    return 1
-fi
-
-XRAY_SOCKS_PORT=""
-XRAY_HTTP_PORT=""
-while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line%%#*}"
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    [[ -z "$line" || "$line" != *=* ]] && continue
-    key="${line%%=*}"
-    val="${line#*=}"
-    key="${key// /}"
-    val="${val#"${val%%[![:space:]]*}"}"
-    val="${val%"${val##*[![:space:]]}"}"
-    val="${val#\"}"; val="${val%\"}"
-    val="${val#\'}"; val="${val%\'}"
-    case "$key" in
-        XRAY_SOCKS_PORT) XRAY_SOCKS_PORT="$val" ;;
-        XRAY_HTTP_PORT)  XRAY_HTTP_PORT="$val" ;;
-    esac
-done < "$_PORTS_FILE"
-
-if [[ -z "$XRAY_SOCKS_PORT" || -z "$XRAY_HTTP_PORT" || "$XRAY_SOCKS_PORT" == "31808" || "$XRAY_HTTP_PORT" == "31809" ]]; then
-    echo "端口文件无效。31808/31809 属于另一套个人代理。"
-    unset _STATE _PORTS_FILE _KIT line key val
-    return 1
-fi
+XRAY_SOCKS_PORT="${XRAY_SOCKS_PORT:-32808}"
+XRAY_HTTP_PORT="${XRAY_HTTP_PORT:-32809}"
 
 export http_proxy="http://127.0.0.1:${XRAY_HTTP_PORT}"
 export https_proxy="$http_proxy"
@@ -56,4 +38,4 @@ export no_proxy="localhost,127.0.0.1,::1,10.*,172.16.*,172.17.*,172.18.*,172.19.
 export NO_PROXY="$no_proxy"
 
 echo "Proxy enabled -> HTTP ${XRAY_HTTP_PORT}, SOCKS ${XRAY_SOCKS_PORT}"
-unset _STATE _PORTS_FILE _KIT line key val
+unset _PROXY_BASE _PORTS_FILE line key val

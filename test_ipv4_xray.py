@@ -22,16 +22,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-KIT = Path(__file__).resolve().parent
-_state = os.environ.get("XRAY_STATE_DIR", "").strip()
-BASE = Path(_state).expanduser().resolve() if _state else KIT
-_bin = os.environ.get("XRAY_BIN", "").strip()
-XRAY = Path(_bin) if _bin else (KIT / "xray")
+BASE = Path(__file__).resolve().parent
+XRAY = BASE / "xray"
 CONFIG = BASE / "config.json"
 NODES = BASE / "nodes.txt"
 PORTS_FILE = BASE / "ports.env"
-APPLIED_FILE = BASE / "applied.json"
-PIN_FILE = BASE / "pin.json"
 
 # Codex actually talks to this endpoint. Override with XRAY_PROBE_URL if needed.
 PROBE_URL = os.environ.get(
@@ -69,11 +64,7 @@ def load_ports() -> tuple[int, int]:
                 socks = v
             elif k == "XRAY_HTTP_PORT" and not http:
                 http = v
-    if not socks or not http:
-        raise SystemExit("ports.env 里没有端口。请重新运行 start.sh。")
-    if socks in {"31808", "31809"} or http in {"31808", "31809"}:
-        raise SystemExit("31808/31809 是另一套个人代理，rootlessxray 不会占用。")
-    return int(socks), int(http)
+    return int(socks or "32808"), int(http or "32809")
 
 
 SOCKS_PORT, HTTP_PORT = load_ports()
@@ -131,19 +122,21 @@ def resolve_ipv4(host: str) -> str | None:
 def parse_ss(uri: str) -> dict[str, Any] | None:
     # ss://method:password@host:port  OR  ss://base64(method:password@host:port)
     # OR ss://base64(method:password)@host:port#name
-    # Also handles clients that emit empty query before fragment: ...:1815?#name
+    # Also accept nonstandard "?#name" (common in some subscriptions).
     raw = uri[5:]
     name = ""
+    if "?" in raw and "#" in raw:
+        # turn "...:port?#备注" into "...:port#备注"
+        raw = raw.replace("?#", "#", 1)
     if "#" in raw:
         raw, frag = raw.split("#", 1)
         name = urllib.parse.unquote(frag)
-    # Drop unused query (?plugin=... or bare "?") so port stays numeric.
-    if "?" in raw:
-        raw = raw.split("?", 1)[0]
+    # strip leftover query junk on hostport if any
+    raw = raw.split("?", 1)[0]
     try:
-        if "@" in raw and not raw.split("@", 1)[0].endswith("="):
-            # maybe userinfo@host already, or base64userinfo@host
+        if "@" in raw:
             userinfo, hostport = raw.rsplit("@", 1)
+            # userinfo may be method:password OR base64(method:password)
             if ":" not in userinfo:
                 userinfo = b64decode_auto(userinfo).decode("utf-8", "replace")
             method, password = userinfo.split(":", 1)
@@ -172,61 +165,46 @@ def parse_ss(uri: str) -> dict[str, Any] | None:
 
 
 def parse_vmess(uri: str) -> dict[str, Any] | None:
-    """Parse vmess://<base64(json)>[#name] share links."""
-    raw = uri[8:]
-    name_override = ""
-    if "#" in raw:
-        raw, frag = raw.split("#", 1)
-        name_override = urllib.parse.unquote(frag)
+    # vmess://base64(json)
     try:
+        raw = uri[8:]
+        if "#" in raw:
+            raw = raw.split("#", 1)[0]
+        raw = raw.replace("?#", "").strip()
         obj = json.loads(b64decode_auto(raw).decode("utf-8", "replace"))
+        host = str(obj.get("add") or "").strip()
+        port = int(obj.get("port") or 0)
+        uuid = str(obj.get("id") or "").strip()
+        if not host or not port or not uuid:
+            return None
+        ipv4 = resolve_ipv4(host)
+        if not ipv4:
+            return None
+        net = str(obj.get("net") or "tcp")
+        tls = str(obj.get("tls") or "")
+        security = "tls" if tls in {"tls", "reality"} else "none"
+        name = str(obj.get("ps") or f"vmess-{ipv4}")
+        return {
+            "protocol": "vmess",
+            "tag_name": name,
+            "address": ipv4,
+            "port": port,
+            "uuid": uuid,
+            "alterId": int(obj.get("aid") or 0),
+            "security_cipher": str(obj.get("scy") or "auto"),
+            "network": net,
+            "security": security,
+            "sni": str(obj.get("sni") or obj.get("host") or host),
+            "fp": str(obj.get("fp") or "chrome"),
+            "alpn": [x for x in str(obj.get("alpn") or "").split(",") if x],
+            "path": str(obj.get("path") or "/"),
+            "host_header": str(obj.get("host") or ""),
+            "headerType": str(obj.get("type") or "none"),
+            "ech": normalize_ech(str(obj.get("ech") or "")),
+            "source_host": host,
+        }
     except Exception:
         return None
-    if not isinstance(obj, dict):
-        return None
-    host = str(obj.get("add") or "").strip().strip("[]")
-    if not host:
-        return None
-    try:
-        port = int(obj.get("port") or 0)
-    except (TypeError, ValueError):
-        return None
-    uuid = str(obj.get("id") or "").strip()
-    if not uuid or port <= 0:
-        return None
-    ipv4 = resolve_ipv4(host)
-    if not ipv4:
-        return None
-    try:
-        alter_id = int(obj.get("aid") or 0)
-    except (TypeError, ValueError):
-        alter_id = 0
-    tls = str(obj.get("tls") or "").strip().lower()
-    security = "tls" if tls in {"tls", "1", "true"} else "none"
-    sni = str(obj.get("sni") or obj.get("host") or host).strip()
-    network = str(obj.get("net") or "tcp").strip() or "tcp"
-    name = name_override or str(obj.get("ps") or "").strip() or f"vmess-{ipv4}"
-    return {
-        "protocol": "vmess",
-        "tag_name": name,
-        "address": ipv4,
-        "port": port,
-        "uuid": uuid,
-        "alter_id": alter_id,
-        "cipher": str(obj.get("scy") or "auto").strip() or "auto",
-        "network": network,
-        "security": security,
-        "sni": sni,
-        "fp": str(obj.get("fp") or "chrome").strip() or "chrome",
-        "alpn": [x for x in str(obj.get("alpn") or "").split(",") if x],
-        "path": str(obj.get("path") or ""),
-        "headerType": str(obj.get("type") or "none"),
-        "host_header": str(obj.get("host") or ""),
-        "serviceName": str(obj.get("path") or "") if network == "grpc" else "",
-        "mode": "",
-        "ech": normalize_ech(str(obj.get("ech") or "")),
-        "source_host": host,
-    }
 
 
 def parse_vless(uri: str) -> dict[str, Any] | None:
@@ -273,6 +251,9 @@ def parse_node(line: str) -> dict[str, Any] | None:
     line = line.strip()
     if not line or line.startswith("#"):
         return None
+    # normalize subscription quirks: "...?#name" -> "...#name"
+    if "://" in line and "?#" in line:
+        line = line.replace("?#", "#", 1)
     if line.startswith("vless://"):
         return parse_vless(line)
     if line.startswith("ss://"):
@@ -315,14 +296,77 @@ def tls_block(node: dict[str, Any], server_name: str) -> dict[str, Any]:
     }
     if node.get("alpn"):
         tls["alpn"] = node["alpn"]
-    ech = str(node.get("ech") or "").strip()
+    ech = normalize_ech(str(node.get("ech") or "").strip())
     if ech:
-        # Share-link form, e.g. crypto.cloudflare.com+udp://223.5.5.5
+        # Share-link form. Resolvers 223.5.5.5 / 119.29.29.29 are rewritten to 1.1.1.1.
         tls["echConfigList"] = ech
     return tls
 
 
-def _stream_settings_from_node(node: dict[str, Any]) -> dict[str, Any]:
+def outbound_from_node(node: dict[str, Any], tag: str) -> dict[str, Any]:
+    if node["protocol"] == "shadowsocks":
+        return {
+            "tag": tag,
+            "protocol": "shadowsocks",
+            "settings": {
+                "servers": [
+                    {
+                        "address": node["address"],
+                        "port": node["port"],
+                        "method": node["method"],
+                        "password": node["password"],
+                    }
+                ]
+            },
+        }
+
+    if node["protocol"] == "vmess":
+        stream: dict[str, Any] = {
+            "network": node.get("network") or "tcp",
+            "security": node.get("security") or "none",
+        }
+        net = stream["network"]
+        if net == "ws":
+            ws: dict[str, Any] = {"path": node.get("path") or "/"}
+            if node.get("host_header"):
+                ws["headers"] = {"Host": node["host_header"]}
+            stream["wsSettings"] = ws
+        elif net == "tcp" and node.get("headerType") and node["headerType"] not in {"", "none"}:
+            stream["tcpSettings"] = {"header": {"type": node["headerType"]}}
+        if stream["security"] == "tls":
+            stream["tlsSettings"] = tls_block(
+                node,
+                node.get("sni") or node.get("source_host") or node["address"],
+            )
+        return {
+            "tag": tag,
+            "protocol": "vmess",
+            "settings": {
+                "vnext": [
+                    {
+                        "address": node["address"],
+                        "port": node["port"],
+                        "users": [
+                            {
+                                "id": node["uuid"],
+                                "alterId": int(node.get("alterId") or 0),
+                                "security": node.get("security_cipher") or "auto",
+                            }
+                        ],
+                    }
+                ]
+            },
+            "streamSettings": stream,
+        }
+
+    # vless
+    user: dict[str, Any] = {
+        "id": node["uuid"],
+        "encryption": node.get("encryption") or "none",
+    }
+    if node.get("flow"):
+        user["flow"] = node["flow"]
+
     stream: dict[str, Any] = {
         "network": node.get("network") or "tcp",
         "security": node.get("security") or "none",
@@ -376,56 +420,6 @@ def _stream_settings_from_node(node: dict[str, Any]) -> dict[str, Any]:
         if node.get("spx"):
             reality["spiderX"] = node["spx"]
         stream["realitySettings"] = reality
-    return stream
-
-
-def outbound_from_node(node: dict[str, Any], tag: str) -> dict[str, Any]:
-    if node["protocol"] == "shadowsocks":
-        return {
-            "tag": tag,
-            "protocol": "shadowsocks",
-            "settings": {
-                "servers": [
-                    {
-                        "address": node["address"],
-                        "port": node["port"],
-                        "method": node["method"],
-                        "password": node["password"],
-                    }
-                ]
-            },
-        }
-
-    stream = _stream_settings_from_node(node)
-
-    if node["protocol"] == "vmess":
-        user: dict[str, Any] = {
-            "id": node["uuid"],
-            "alterId": int(node.get("alter_id") or 0),
-            "security": node.get("cipher") or "auto",
-        }
-        return {
-            "tag": tag,
-            "protocol": "vmess",
-            "settings": {
-                "vnext": [
-                    {
-                        "address": node["address"],
-                        "port": node["port"],
-                        "users": [user],
-                    }
-                ]
-            },
-            "streamSettings": stream,
-        }
-
-    # vless
-    user = {
-        "id": node["uuid"],
-        "encryption": node.get("encryption") or "none",
-    }
-    if node.get("flow"):
-        user["flow"] = node["flow"]
 
     return {
         "tag": tag,
@@ -568,18 +562,7 @@ def load_nodes() -> list[dict[str, Any]]:
     return nodes
 
 
-def read_pin_name() -> str:
-    """Return the pinned node name, or empty when selection stays automatic."""
-    try:
-        data = json.loads(PIN_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ""
-    if not isinstance(data, dict) or data.get("mode") != "pin":
-        return ""
-    return str(data.get("name") or "").strip()
-
-
-def build_config(working: list[dict[str, Any]], selector: str = "proxy-") -> dict[str, Any]:
+def build_config(working: list[dict[str, Any]]) -> dict[str, Any]:
     # Always rebuild inbounds from ports.env so copied kits / custom ports work.
     base: dict[str, Any] = {
         "log": {"loglevel": "warning"},
@@ -617,7 +600,7 @@ def build_config(working: list[dict[str, Any]], selector: str = "proxy-") -> dic
         "balancers": [
             {
                 "tag": "auto",
-                "selector": [selector],
+                "selector": ["proxy-"],
                 "strategy": {"type": "leastPing"},
             }
         ],
@@ -668,39 +651,8 @@ def main() -> int:
         log("NO_WORKING_NODE")
         return 0
 
-    ranked = working if MAX_APPLY <= 0 else working[:MAX_APPLY]
-    chosen = [n for _, n, _ in ranked]
-    pin_name = read_pin_name()
-    selector = "proxy-"
-    if pin_name:
-        for i, node in enumerate(chosen, start=1):
-            if (node.get("tag_name") or "") == pin_name:
-                selector = f"proxy-{i:03d}"
-                log(f"PIN\t{selector}\t{pin_name}")
-                break
-        else:
-            log(f"PIN_MISSED\t{pin_name}")
-            pin_name = ""
-    cfg = build_config(chosen, selector)
-    applied_doc = {
-        "mode": "pin" if pin_name else "auto",
-        "pin": pin_name,
-        "nodes": [],
-    }
-    for i, (latency, node, detail) in enumerate(ranked, start=1):
-        tag = f"proxy-{i:03d}"
-        applied_doc["nodes"].append(
-            {
-                "tag": tag,
-                "name": node.get("tag_name") or tag,
-                "protocol": node.get("protocol") or "",
-                "address": node.get("address") or "",
-                "port": node.get("port") or 0,
-                "latency": round(latency, 3),
-                "detail": detail,
-                "active": selector == "proxy-" or tag == selector,
-            }
-        )
+    chosen = [n for _, n, _ in (working if MAX_APPLY <= 0 else working[:MAX_APPLY])]
+    cfg = build_config(chosen)
     # validate before write
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
         json.dump(cfg, tf, ensure_ascii=False, indent=2)
@@ -716,16 +668,8 @@ def main() -> int:
             log("ERROR: generated config failed xray -test")
             log((test.stderr or test.stdout or "")[:500])
             return 3
-        # /tmp and /disk227 are different filesystems; use copy+replace
+        # temp dir may be on another filesystem; use copy instead of rename
         shutil.copyfile(tmp_name, CONFIG)
-        APPLIED_FILE.write_text(
-            json.dumps(applied_doc, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        try:
-            os.chmod(APPLIED_FILE, 0o600)
-        except OSError:
-            pass
     finally:
         if os.path.exists(tmp_name):
             try:
