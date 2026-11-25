@@ -6,7 +6,6 @@ BASE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 XRAY="$BASE/xray"
 CONFIG="$BASE/config.json"
 NODES="$BASE/nodes.txt"
-PORTS_FILE="$BASE/ports.env"
 TEST_SCRIPT="$BASE/test_ipv4_xray.py"
 TEST_LOG="$BASE/test_nodes_pool.log"
 RUN_LOG="$BASE/xray_run.log"
@@ -14,31 +13,8 @@ PID_FILE="$BASE/xray.pid"
 PROXY_ENV="$BASE/proxy_env.sh"
 # Pass/fail = can reach ChatGPT Codex backend (401/403 count as OK; timeout does not).
 TEST_URL="${XRAY_PROBE_URL:-https://chatgpt.com/backend-api/codex/responses}"
-TEST_POST=1
-
-# Load ports (env overrides ports.env)
-if [[ -f "$PORTS_FILE" ]]; then
-    # shellcheck disable=SC1090
-    set -a
-    # only export simple KEY=VAL lines
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line="${line%%#*}"
-        line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-        [[ -z "$line" || "$line" != *=* ]] && continue
-        key="${line%%=*}"
-        val="${line#*=}"
-        key="$(echo "$key" | sed 's/[[:space:]]//g')"
-        val="$(echo "$val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^["'\'']//;s/["'\'']$//')"
-        case "$key" in
-            XRAY_SOCKS_PORT|XRAY_HTTP_PORT)
-                [[ -n "${!key:-}" ]] || export "$key=$val"
-                ;;
-        esac
-    done < "$PORTS_FILE"
-    set +a
-fi
-SOCKS_PORT="${XRAY_SOCKS_PORT:-32808}"
-HTTP_PORT="${XRAY_HTTP_PORT:-32809}"
+ports="$(python3 "$TEST_SCRIPT" --print-ports)" || exit 1
+read -r SOCKS_PORT HTTP_PORT <<< "$ports"
 export XRAY_SOCKS_PORT="$SOCKS_PORT"
 export XRAY_HTTP_PORT="$HTTP_PORT"
 
@@ -63,9 +39,6 @@ echo "[1/6] Checking required files..."
 if [ -f "$XRAY" ] && [ ! -x "$XRAY" ]; then
     chmod +x "$XRAY" 2>/dev/null || true
 fi
-if [ -f "$TEST_SCRIPT" ] && [ ! -x "$TEST_SCRIPT" ]; then
-    chmod +x "$TEST_SCRIPT" 2>/dev/null || true
-fi
 if [ ! -x "$XRAY" ]; then
     echo "ERROR: Xray binary not executable: $XRAY"
     echo "Fix with:  chmod +x \"$XRAY\""
@@ -80,10 +53,6 @@ fi
 if [ ! -s "$NODES" ] || ! grep -qE '^(vless|ss|vmess|trojan)://' "$NODES"; then
     echo "ERROR: $NODES has no usable node URLs (vless:// / ss:// ...)."
     echo "有订阅就写入 subscription（一行地址），再运行一次。"
-    exit 1
-fi
-if [ ! -f "$TEST_SCRIPT" ]; then
-    echo "ERROR: Missing test script: $TEST_SCRIPT"
     exit 1
 fi
 # config.json is optional on first run; Python will create it.
@@ -165,23 +134,13 @@ CURL_BIN="/usr/bin/curl"
 [ -x "$CURL_BIN" ] || CURL_BIN="curl"
 _err="/tmp/xray_verify_err.$$"
 _out="/tmp/xray_verify_out.$$"
-set +e
-if [[ "${TEST_POST:-1}" == "1" ]]; then
-    env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u LD_LIBRARY_PATH \
-        "$CURL_BIN" -sS -o /dev/null --max-time 25 \
-        --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
-        -X POST -H 'content-type: application/json' -d '{}' \
-        -w "%{http_code} %{time_total}" \
-        "$TEST_URL" >"$_out" 2>"$_err"
-else
-    env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u LD_LIBRARY_PATH \
-        "$CURL_BIN" -sS -o /dev/null --max-time 25 \
-        --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
-        -w "%{http_code} %{time_total}" \
-        "$TEST_URL" >"$_out" 2>"$_err"
-fi
+env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u LD_LIBRARY_PATH \
+    "$CURL_BIN" -sS -o /dev/null --max-time 25 \
+    --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
+    -X POST -H 'content-type: application/json' -d '{}' \
+    -w "%{http_code} %{time_total}" \
+    "$TEST_URL" >"$_out" 2>"$_err"
 curl_rc=$?
-set -u
 http_line="$(cat "$_out" 2>/dev/null || true)"
 http_code="${http_line%% *}"
 http_time="${http_line#* }"

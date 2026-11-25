@@ -48,6 +48,6 @@ echo "进入代理终端，输入 exit 返回原来的终端。"
 # Read the user's Bash settings before applying this instance's proxy.
 exec bash --rcfile <(
     printf '%s\n' '[[ ! -r ~/.bashrc ]] || source ~/.bashrc'
-    printf 'source %q\n' "$BASE/proxy_env.sh"
+    printf 'source %q || exit 1\n' "$BASE/proxy_env.sh"
     printf '%s\n' 'command curl -fsS --max-time 8 https://ipinfo.io || echo "出口 IP 查询失败，仍可使用代理。" >&2' 'printf "\n"'
 ) -i

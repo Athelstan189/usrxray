@@ -3,30 +3,15 @@
 # Sets http(s)_proxy / all_proxy for the current shell to this xray instance.
 
 _PROXY_BASE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-_PORTS_FILE="${_PROXY_BASE}/ports.env"
-
-XRAY_SOCKS_PORT="${XRAY_SOCKS_PORT:-}"
-XRAY_HTTP_PORT="${XRAY_HTTP_PORT:-}"
-if [[ -f "$_PORTS_FILE" ]]; then
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line="${line%%#*}"
-        line="${line#"${line%%[![:space:]]*}"}"
-        line="${line%"${line##*[![:space:]]}"}"
-        [[ -z "$line" || "$line" != *=* ]] && continue
-        key="${line%%=*}"; val="${line#*=}"
-        key="${key// /}"
-        val="${val#"${val%%[![:space:]]*}"}"
-        val="${val%"${val##*[![:space:]]}"}"
-        val="${val#\"}"; val="${val%\"}"
-        val="${val#\'}"; val="${val%\'}"
-        case "$key" in
-            XRAY_SOCKS_PORT) [[ -z "$XRAY_SOCKS_PORT" ]] && XRAY_SOCKS_PORT="$val" ;;
-            XRAY_HTTP_PORT)  [[ -z "$XRAY_HTTP_PORT"  ]] && XRAY_HTTP_PORT="$val"  ;;
-        esac
-    done < "$_PORTS_FILE"
+if ! _proxy_ports="$(
+    XRAY_SOCKS_PORT="${XRAY_SOCKS_PORT:-}" XRAY_HTTP_PORT="${XRAY_HTTP_PORT:-}" \
+        python3 "$_PROXY_BASE/test_ipv4_xray.py" --print-ports
+)"; then
+    unset _PROXY_BASE _proxy_ports
+    return 1
 fi
-XRAY_SOCKS_PORT="${XRAY_SOCKS_PORT:-32808}"
-XRAY_HTTP_PORT="${XRAY_HTTP_PORT:-32809}"
+read -r XRAY_SOCKS_PORT XRAY_HTTP_PORT <<< "$_proxy_ports"
+unset _PROXY_BASE _proxy_ports
 
 export http_proxy="http://127.0.0.1:${XRAY_HTTP_PORT}"
 export https_proxy="$http_proxy"
@@ -38,4 +23,3 @@ export no_proxy="localhost,127.0.0.1,::1,10.*,172.16.*,172.17.*,172.18.*,172.19.
 export NO_PROXY="$no_proxy"
 
 echo "Proxy enabled -> HTTP ${XRAY_HTTP_PORT}, SOCKS ${XRAY_SOCKS_PORT}"
-unset _PROXY_BASE _PORTS_FILE line key val

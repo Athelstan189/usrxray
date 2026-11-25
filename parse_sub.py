@@ -156,7 +156,8 @@ def show(rows: list[tuple[str, str, dict[str, Any] | None]], counts: dict[str, i
         if status == "未得到 IPv4":
             shown_drops += 1
             if shown_drops <= 20:
-                print(f"DROP\t{uri[:120]}")
+                protocol = uri.partition("://")[0]
+                print(f"DROP\t{protocol}：未得到 IPv4")
             continue
         assert node is not None
         sni = node.get("sni") or ""

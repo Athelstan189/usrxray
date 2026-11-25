@@ -55,8 +55,8 @@ def load_ports() -> tuple[int, int]:
     http = os.environ.get("XRAY_HTTP_PORT", "").strip()
     if PORTS_FILE.is_file():
         for line in PORTS_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
+            line = line.split("#", 1)[0].strip()
+            if "=" not in line:
                 continue
             k, v = line.split("=", 1)
             k, v = k.strip(), v.strip().strip('"').strip("'")
@@ -689,4 +689,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if sys.argv[1:] == ["--print-ports"]:
+        print(SOCKS_PORT, HTTP_PORT)
+    else:
+        sys.exit(main())
