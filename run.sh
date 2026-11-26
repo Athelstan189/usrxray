@@ -8,8 +8,8 @@ if [[ -t 0 && -t 1 ]]; then
 fi
 
 updater="$BASE/update_xray_nodes.sh"
-# Refresh only if the saved nodes cannot bring up a verified proxy.
-if ! bash "$updater" "$mode" --cached; then
+# A working proxy is enough. Retest nodes.txt only when that connection fails.
+if ! bash "$updater" "$mode" --live && ! bash "$updater" "$mode" --cached; then
     subscription="$BASE/subscription"
     if ! grep -qsE '^[[:space:]]*[^#[:space:]]' "$subscription"; then
         if [[ -z "$mode" ]]; then
